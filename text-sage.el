@@ -209,9 +209,103 @@
                       :frequency_penalty (text-sage-llm-openai-chat-frequency-penalty model)
                       :logit_bias (text-sage-llm-openai-chat-logit-bias model)))))
    (lambda (body)
-     (gethash "content" (gethash "message" (aref (gethash "choices" (json-parse-string body)) 0))))))
+     (gethash "content" (gethash "message" (aref (gethash "choices" (json-parse-string body)) ))))))
+
+;;; Prompts
+
+(defconst text-sage-agent-labels
+  '((:user . "User")
+    (:system . "System")
+    (:assistant . "Assistant")))
+
+(defun text-sage-chat-prompt-p (prompt)
+  (and (listp prompt)
+       (seq-every-p
+        (lambda (elt)
+          (and (= 2 (length elt))
+               (keywordp (car elt))
+               (stringp (cadr elt))))
+        prompt)))
+
+(defun text-sage--chat-format (prompt vars)
+  (unless (text-sage-chat-prompt-p prompt)
+    (error "prompt must be a valid chat prompt."))
+  (text-sage-format
+   (string-join
+    (seq-map
+     (pcase-lambda (`(,agent ,message))
+       (format "%s: %s" (alist-get agent text-sage-agent-labels) message))
+     prompt)
+    "\n")
+   vars))
+
+(defun text-sage-format (prompt vars)
+  (if (text-sage-chat-prompt-p prompt)
+      (text-sage--chat-format prompt vars)
+    (with-temp-buffer
+      (insert prompt)
+      (pcase-dolist (`(,key . ,val) vars)
+        (goto-char (point-min))
+        (while (search-forward-regexp
+                (format "{{ *%s *}}" (regexp-quote (if (symbolp key) (symbol-name key) key)))
+                nil t)
+          (replace-match val)))
+      (buffer-string))))
+
+(defun text-sage-format-prompt (prompt vars)
+  (unless (text-sage-chat-prompt-p prompt)
+    (error "prompt must be a valid chat prompt."))
+  (seq-map
+   (pcase-lambda (`(,agent ,message))
+     (list agent (text-sage-format message vars)))
+   prompt))
+
+;;; Example Selector
+
+(defvar text-sage-example-separator "\n\n")
+
+(cl-defstruct (text-sage-example
+               (:constructor text-sage-example-create)
+               (:copier nil))
+  template
+  items)
+
+(defun text-sage-example-selector-by-length (max-length &optional get_text_length)
+  (lambda (example)
+    (unless (text-sage-example-p example)
+      (error "invalid type of example"))
+    ))
+
+(text-sage-example-create
+ :template "Input: {input}\nOutput: {output}"
+ :items '(((input . "happy")
+           (output . "sad"))
+          ((input . "tall")
+           (output . "short"))
+          ((input . "energetic")
+           (output . "lethargic"))
+          ((input . "sunny")
+           (output . "gloomy"))
+          ((input . "windy")
+           (output . "calm"))))
 
 ;;; Playground
+
+(text-sage-format
+ '((:system "You are a {{ adjective }} robot") (:user "sunny {{ game }}"))
+ '((game . "baseball")
+   (adjective . "funny")))
+
+(text-sage-chat-prompt-p '((:system "You are a killer robot") (:user "sunny")))
+
+(text-sage-format "{{abc}}->{{def}}" '((abc . "a") (def . "d")))
+
+(text-sage-format
+ '((:system "Your name is Martin")
+   (:user "{question}"))
+ '((abc . "a") (def . "d")))
+
+
 
 (let ((llm (text-sage-llm-openai-create
             :model "text-davinci-003")))
