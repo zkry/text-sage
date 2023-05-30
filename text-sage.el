@@ -33,23 +33,26 @@
 
 (defun text-sage-async-shell-command (callback args extract-response)
   "Run ARGS in a shell asynchronously and call CALLBACK with the output."
-  (let* ((process (apply #'start-process
-                         (append '("text-sage-llm-openai" "*text-sage-openai*") args))))
+  (let* ((request-id (cl-random 1000000))
+         (process
+          (apply #'start-process
+                 (append `("text-sage-llm-openai"
+                           ,(format "*text-sage-openai-%d*" request-id))
+                         args))))
 
     (when process
       (with-current-buffer (process-buffer process)
         (erase-buffer))
       (set-process-sentinel
        process
-       `(lambda (process _event)
-          (let ((callback ,callback))
-            (let ((output (with-current-buffer (process-buffer process)
-                            (buffer-string)))
-                  (exit-status (process-exit-status process)))
-              (if (= exit-status 0)
-                  (if (string-empty-p (string-trim output))
-                      (funcall callback output nil)
-                    (funcall callback (funcall ,extract-response output) nil))))))))))
+       (lambda (process _event)
+         (let ((output (with-current-buffer (process-buffer process)
+                         (buffer-string)))
+               (exit-status (process-exit-status process)))
+           (if (= exit-status 0)
+               (if (string-empty-p (string-trim output))
+                   (funcall callback output nil)
+                 (funcall callback (funcall extract-response output) nil)))))))))
 
 (defun text-sage--filter-nil-plist-items (plist)
   "Return PLIST with nil items removed."
@@ -270,26 +273,174 @@
   template
   items)
 
-(defun text-sage-example-selector-by-length (max-length &optional get_text_length)
+(defun text-sage-example-selector-by-length (max-length &optional get-text-length)
   (lambda (example)
     (unless (text-sage-example-p example)
       (error "invalid type of example"))
-    ))
+    (let ((template (text-sage-example-template example))
+          (items (text-sage-example-items example))
+          (text ""))
+      (catch 'done
+        (while items
+          (let* ((at-item (car items))
+                 (next-text (concat text (if (equal text "")
+                                             ""
+                                           text-sage-example-separator)
+                                    (text-sage-format template at-item))))
+            (if (<= (funcall (or get-text-length #'length) next-text) max-length)
+                (setq text next-text)
+              (throw 'done nil)))
+          (setq items (cdr items))))
+      text)))
 
-(text-sage-example-create
- :template "Input: {input}\nOutput: {output}"
- :items '(((input . "happy")
-           (output . "sad"))
-          ((input . "tall")
-           (output . "short"))
-          ((input . "energetic")
-           (output . "lethargic"))
-          ((input . "sunny")
-           (output . "gloomy"))
-          ((input . "windy")
-           (output . "calm"))))
+;;; Parsers
+
+(cl-defstruct (text-sage-parser
+               (:constructor text-sage-parser-create)
+               (:copier nil))
+  "A parser for the output of a LLM."
+  format-instructions
+  parse-function
+  parse-with-prompt-function)
+
+(defvar text-sage-json-parser
+  (text-sage-parser-create
+   :format-instructions
+   "The output should be properly formatted JSON."
+   :parse-function
+   (lambda (str)
+     (json-parse-string str))))
+
+(defun text-sage-parse (parser str)
+  "Parse STR with PARSER."
+  (unless (text-sage-parser parser)
+    (error "invalid parser type: %S" parser))
+  (condition-case err
+      (let ((parse-func (text-sage-parser-parse-func parse)))
+        (funcall parse-func str))
+    (error (cadr err))))
+
+;;; Memory
+
+(defvar text-sage-conversation-memory-human-tag "Human")
+(defvar text-sage-conversation-memory-ai-tag "AI")
+
+(cl-defstruct (text-sage-conversation-buffer-memory
+               (:constructor text-sage-conversation-buffer-memory-create)
+               (:copier nil))
+  messages)
+
+(cl-defgeneric text-sage-save-memory-context (memory input output))
+
+(cl-defmethod text-sage-save-memory-context
+  ((memory text-sage-conversation-buffer-memory) input output)
+  (let ((messages (text-sage-conversation-buffer-memory-messages memory)))
+    (setf (text-sage-conversation-buffer-memory-messages memory)
+          (append messages
+                  `((:user ,input)
+                    (:assistant ,output))))))
+
+(cl-defgeneric text-sage-load-memory-variables (memory))
+
+(cl-defmethod text-sage-load-memory-variables ((memory text-sage-conversation-buffer-memory))
+  (let* ((messages (text-sage-conversation-buffer-memory-messages memory))
+         (formatted-message
+          (string-join
+           (seq-map
+            (pcase-lambda (`(,agent ,msg))
+              (if (equal agent :user)
+                  (format "%s: %s" text-sage-conversation-memory-human-tag msg)
+                (format "%s: %s" text-sage-conversation-memory-ai-tag msg)))
+            messages)
+           "\n")))
+    `((history-messages . ,messages)
+      (history . ,formatted-message))))
+
+;;; Chains
+
+(cl-defstruct (text-sage-llm-chain
+               (:constructor text-sage-llm-chain-create)
+               (:copier nil))
+  prompt
+  llm)
+
+(cl-defgeneric text-sage-chain-run (chain inputs))
+
+(cl-defmethod text-sage-chain-run ((chain text-sage-llm-chain) inputs callback)
+  (let* ((prompt (text-sage-llm-chain-prompt chain))
+         (formatted-prompt (text-sage-format prompt inputs))
+         (llm (text-sage-llm-chain-llm chain)))
+    (text-sage-llm-call llm formatted-prompt callback)))
+
+(defvar text-sage-conversation-chain-default-prompt
+  "The following is a friendly conversation between a human and an AI. The AI is talkative and provides lots of specific details from its context. If the AI does not know the answer to a question, it truthfully says it does not know.
+
+Current conversation:
+{{history}}
+Human: {{input}}
+AI:")
+
+(defvar text-sage-conversation-chain-default-chat-prompt
+  '((:sytem "The following is a friendly conversation between a human and an AI. The AI is talkative and provides lots of specific details from its context. If the AI does not know the answer to a question, it truthfully says it does not know.")
+    :@history
+    (:user "{{input}}")))
+
+(cl-defstruct (text-sage-conversation-chain
+               (:constructor text-sage-conversation-chain-create)
+               (:copier nil))
+  llm
+  (prompt text-sage-conversation-chain-default-prompt)
+  memory)
+
+(defun text-sage--conversation-chain-update-memory (chain input output)
+  (let ((memory (text-sage-conversation-chain-memory chain)))
+    (text-sage-save-memory-context memory input output)))
+
+(cl-defmethod text-sage-chain-run ((chain text-sage-conversation-chain) inputs callback)
+  (when (stringp inputs)
+    (setq inputs `((input . ,inputs))))
+  (let* ((prompt (text-sage-conversation-chain-prompt chain))
+         (llm (text-sage-conversation-chain-llm chain))
+         (memory (text-sage-conversation-chain-memory chain))
+         (formatted-prompt
+          (text-sage-format prompt (append inputs (text-sage-load-memory-variables memory)))))
+    (text-sage-llm-call
+     llm formatted-prompt
+     (lambda (result partial)
+       (when (not partial)
+         (text-sage--conversation-chain-update-memory chain (alist-get 'input inputs) result))
+       (funcall callback result partial)))))
 
 ;;; Playground
+
+(defconst testchain
+  (let* ((llm (text-sage-llm-openai-create :model "text-davinci-003" :max-tokens 100))
+        (memory (text-sage-conversation-buffer-memory-create))
+        (chain (text-sage-conversatino-chain-create
+                :memory memory
+                :llm llm)))
+    chain))
+
+(text-sage-conversation-chain-memory testchain)
+
+(text-sage-chain-run testchain "What is your name?" (lambda (msg _) (message ">>> %s" msg)))
+
+(text-sage-chain-run testchain "Soryy, I couldn't hear that. What was that again?" (lambda (msg _) (message ">>> %s" msg)))
+
+(text-sage-chain-run testchain "Awesome. I'm happy to meet you." (lambda (msg _) (message ">>> %s" msg)))
+
+(let* ((llm (text-sage-llm-openai-create :model "text-davinci-003" :max-tokens 100))
+       (chain (text-sage-llm-chain-create
+               :prompt "The following is a joke about {{topic}}:\n"
+               :llm llm)))
+  (text-sage-chain-run chain '((topic . "stars"))
+                       (lambda (msg _) (message ">>> %s" msg)))
+  (text-sage-chain-run chain '((topic . "tables"))
+                       (lambda (msg _) (message ">>> %s" msg))))
+
+(let* ((mem (text-sage-conversation-buffer-memory-create)))
+  (text-sage-save-memory-context mem "What is the color of the sky?" "Blue.")
+  (text-sage-load-memory-variables mem))
 
 (text-sage-format
  '((:system "You are a {{ adjective }} robot") (:user "sunny {{ game }}"))
@@ -304,8 +455,6 @@
  '((:system "Your name is Martin")
    (:user "{question}"))
  '((abc . "a") (def . "d")))
-
-
 
 (let ((llm (text-sage-llm-openai-create
             :model "text-davinci-003")))
