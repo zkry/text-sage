@@ -28,20 +28,45 @@
 ;;; Code:
 
 (require 'auth-source)
-
 ;;; Machinery
 
 ;;; taken from shell-maker.el
-(defun text-sage-async-shell-command (callback args extract-response &optional streaming)
+(defun text-sage-async-shell-command (callback args extract-response &optional streaming on-complete)
   "Run ARGS in a shell asynchronously and call CALLBACK with the output."
-  (let* ((request-id (cl-random 1000000))
+  (let* ((buffer (shell-maker-buffer shell-maker-config))
+         (request-id (cl-random 1000000))
          (process
           (apply #'start-process
                  (append `("text-sage-llm-openai"
                            ,(format "*text-sage-openai-%d*" request-id))
                          args)))
+         (preparsed)
          (remaining-text))
     (when process
+      (when streaming
+        (set-process-filter
+         process
+         (lambda (process output)
+           ;; (message "===============OUTPUT:\n%s\n\n\n" output)
+           (when (buffer-live-p buffer)
+             (setq remaining-text (concat remaining-text output))
+             (setq preparsed (shell-maker--preparse-json remaining-text))
+             (message "===============PREPARSED:\n%s\n\n\n" preparsed)
+             (if (car preparsed)
+                 (mapc (lambda (obj)
+                         (with-current-buffer buffer
+                           (funcall callback (funcall extract-response obj) t)))
+                       (car preparsed))
+               (with-current-buffer buffer
+                 (let ((curl-exit-code (shell-maker--curl-exit-status-from-error-string (cdr preparsed))))
+                   (cond ((eq 0 curl-exit-code)
+                          (funcall callback (cdr preparsed) t))
+                         ((numberp curl-exit-code)
+                          ;; (funcall error-callback (string-trim (cdr preparsed)))
+                          )
+                         (t
+                          (funcall callback (cdr preparsed) t))))))
+             (setq remaining-text (cdr preparsed))))))
       (with-current-buffer (process-buffer process)
         (erase-buffer))
       (set-process-sentinel
@@ -50,11 +75,15 @@
          (let ((output (with-current-buffer (process-buffer process)
                          (buffer-string)))
                (exit-status (process-exit-status process)))
-           ;; (message "Proc sentinel> %s" output)
-           (if (= exit-status 0)
-               (if (string-empty-p (string-trim output))
-                   (funcall callback output nil)
-                 (funcall callback (funcall extract-response output) nil)))))))))
+           (when (functionp on-complete)
+             (funcall on-complete))
+           (message "Proc sentinel> %s" output)
+           (with-current-buffer buffer
+             (if (= exit-status 0)
+                 (if (string-empty-p (string-trim output))
+                     (funcall callback output nil)
+                   (funcall callback (funcall extract-response output) nil))))))))
+    process))
 
 (defun text-sage--filter-nil-plist-items (plist)
   "Return PLIST with nil items removed."
@@ -67,10 +96,12 @@
 
 ;;;; LLMs
 
+(defconst text-sage-lm-requests (make-hash-table :test 'eq))
+(defvar text-sage-prevent-multiple-calls t)
+
 (cl-defgeneric text-sage-llm-call (model prompt callback &optional stop)
   "Call Language MODEL with PROMPT and STOP and call CALLBACK with res.")
 
-;; TODO: is there a better way to do this?
 (cl-defgeneric text-sage-chat-llm-p (model)
   "Return non-nil if MODEL has a chat API."
   nil)
@@ -98,29 +129,46 @@
 (cl-defmethod text-sage-llm-call ((model text-sage-llm-openai) prompt callback &optional stop)
   "Call OpenAI Language MODEL with PROMPT and STOP and call CALLBACK with res."
   ;; sync shell command
-  (text-sage-async-shell-command
-   callback
-   (list "curl"
-         text-sage-llm-openai-completions-url
-         "--fail-with-body"
-         "--no-progress-meter" "-m" "600"
-         "-H" "Content-Type: application/json"
-         "-H" (format "Authorization: Bearer %s" text-sage-openai-key)
-         "-d" (json-encode
-               (text-sage--filter-nil-plist-items
-                (list :prompt prompt
-                      :model (text-sage-llm-openai-model model)
-                      :max_tokens (text-sage-llm-openai-max-tokens model)
-                      :temperature (text-sage-llm-openai-temperature model)
-                      :top_p (text-sage-llm-openai-top-p model)
-                      :logprobs (text-sage-llm-openai-logprobs model)
-                      :stop stop
-                      :presence_penalty (text-sage-llm-openai-presence-penalty model)
-                      :frequency_penalty (text-sage-llm-openai-frequency-penalty model)
-                      :best_of (text-sage-llm-openai-best-of model)
-                      :logit_bias (text-sage-llm-openai-logit-bias model)))))
-   (lambda (body)
-     (gethash "text" (aref (gethash "choices" (json-parse-string body)) 0)))))
+
+  (when (and text-sage-prevent-multiple-calls
+             (gethash model text-sage-lm-requests))
+    (error "Model has an in progress request: %s" model))
+  (let ((proc (text-sage-async-shell-command
+               callback
+               (list "curl"
+                     text-sage-llm-openai-completions-url
+                     "--fail-with-body"
+                     "--no-progress-meter" "-m" "600"
+                     "-H" "Content-Type: application/json"
+                     "-H" (format "Authorization: Bearer %s" text-sage-openai-key)
+                     "-d" (json-encode
+                           (text-sage--filter-nil-plist-items
+                            (list :prompt prompt
+                                  :model (text-sage-llm-openai-model model)
+                                  :max_tokens (text-sage-llm-openai-max-tokens model)
+                                  :temperature (text-sage-llm-openai-temperature model)
+                                  :top_p (text-sage-llm-openai-top-p model)
+                                  :logprobs (text-sage-llm-openai-logprobs model)
+                                  :stop stop
+                                  :stream t
+                                  :presence_penalty (text-sage-llm-openai-presence-penalty model)
+                                  :frequency_penalty (text-sage-llm-openai-frequency-penalty model)
+                                  :best_of (text-sage-llm-openai-best-of model)
+                                  :logit_bias (text-sage-llm-openai-logit-bias model)))))
+               (lambda (body)
+                 (alist-get 'text
+                            (aref (alist-get 'choices
+                                             (if (stringp body)
+                                                 (json-parse-string body :object-type 'alist)
+                                               body))
+                                  0)))
+               t
+               (if text-sage-prevent-multiple-calls
+                   (lambda ()
+                     (remhash model text-sage-lm-requests))
+                 (lambda ())))))
+    (when text-sage-prevent-multiple-calls
+      (puthash model proc text-sage-lm-requests))))
 
 ;;; Hugging Face
 
@@ -198,33 +246,63 @@
 
 (cl-defmethod text-sage-llm-chat-call ((model text-sage-llm-openai-chat) messages callback &optional stop)
   "Call OpenAI Language MODEL with MESSAGES and STOP and call CALLBACK with res."
+  (when (and text-sage-prevent-multiple-calls (gethash model text-sage-lm-requests))
+    (error "Model has an in progress request: %s" model))
   (let ((formatted-messages
          (seq-map (pcase-lambda (`(,role ,msg))
                     `((role . ,(substring (symbol-name role) 1))
                       (content . ,msg)))
                   messages)))
-    (text-sage-async-shell-command
-     callback
-     (list "curl"
-           text-sage-llm-openai-chat-completions-url
-           "--fail-with-body"
-           "--no-progress-meter" "-m" "600"
-           "-H" "Content-Type: application/json"
-           "-H" (format "Authorization: Bearer %s" text-sage-openai-key)
-           "-d" (json-encode
-                 (text-sage--filter-nil-plist-items
-                  (list :messages formatted-messages
-                        :model (text-sage-llm-openai-chat-model model)
-                        :max_tokens (text-sage-llm-openai-chat-max-tokens model)
-                        :n (text-sage-llm-openai-chat-n model)
-                        :temperature (text-sage-llm-openai-chat-temperature model)
-                        :top_p (text-sage-llm-openai-chat-top-p model)
-                        :stop stop
-                        :presence_penalty (text-sage-llm-openai-chat-presence-penalty model)
-                        :frequency_penalty (text-sage-llm-openai-chat-frequency-penalty model)
-                        :logit_bias (text-sage-llm-openai-chat-logit-bias model)))))
-     (lambda (body)
-       (gethash "content" (gethash "message" (aref (gethash "choices" (json-parse-string body)) 0)))))))
+    (let ((proc (text-sage-async-shell-command
+                 callback
+                 (list "curl"
+                       text-sage-llm-openai-chat-completions-url
+                       "--fail-with-body"
+                       "--no-progress-meter" "-m" "600"
+                       "-H" "Content-Type: application/json"
+                       "-H" (format "Authorization: Bearer %s" text-sage-openai-key)
+                       "-d" (json-encode
+                             (text-sage--filter-nil-plist-items
+                              (list :messages formatted-messages
+                                    :model (text-sage-llm-openai-chat-model model)
+                                    :max_tokens (text-sage-llm-openai-chat-max-tokens model)
+                                    :n (text-sage-llm-openai-chat-n model)
+                                    :temperature (text-sage-llm-openai-chat-temperature model)
+                                    :top_p (text-sage-llm-openai-chat-top-p model)
+                                    :stop stop
+                                    :presence_penalty (text-sage-llm-openai-chat-presence-penalty model)
+                                    :frequency_penalty (text-sage-llm-openai-chat-frequency-penalty model)
+                                    :logit_bias (text-sage-llm-openai-chat-logit-bias model)))))
+                 (lambda (body)
+                   ;; TODO refactor this.
+                   (alist-get 'content
+                              (alist-get 'message
+                                         (aref (alist-get 'choices
+                                                          (if (stringp body)
+                                                              (json-parse-string body :object-type 'alist)
+                                                            body))
+                                               0))))
+                 t
+                 (if text-sage-prevent-multiple-calls
+                     (lambda ()
+                       (remhash model text-sage-lm-requests))
+                   (lambda ())))))
+      (when text-sage-prevent-multiple-calls
+       (puthash model proc text-sage-lm-requests)))))
+
+;;; Tokens
+
+;; TODO: implement token counting
+(defun text-sage-count-tokens (message)
+  (cond
+   ((stringp message)
+    (/ (length message) 4))
+   ((text-sage-chat-prompt-p message)
+    (seq-reduce
+     (pcase-lambda (acc `(,_ ,msg))
+       (+ acc (/ (length msg) 4)))
+     message
+     0))))
 
 ;;; Prompts
 
@@ -253,9 +331,10 @@ second a string."
         (lambda (elt)
           (or (and (symbolp elt)
                    (string-prefix-p ":@" (symbol-name elt)))
-           (and (= 2 (length elt))
-                (keywordp (car elt))
-                (stringp (cadr elt)))))
+              (and (listp elt)
+                   (= 2 (length elt))
+                   (keywordp (car elt))
+                   (stringp (cadr elt)))))
         prompt)))
 
 (defun text-sage--chat-to-text-format (prompt vars)
@@ -292,9 +371,12 @@ second a string."
                        (replacement-elt (alist-get replacement vars)))
                   (unless (assoc replacement vars)
                     (error "no replacement variable found for variable %s" replacement))
-                  (unless (text-sage-chat-prompt-p replacement-elt)
-                    (error "invalid type for replacement %s" replacement))
-                  (append acc replacement-elt)))
+                  (cond
+                   ((text-sage-chat-prompt-p replacement-elt)
+                    (append acc replacement-elt))
+                   ((text-sage-chat-prompt-p (list replacement-elt))
+                    (append acc (list replacement-elt)))
+                   (t (error "invalid type for replacement %s" replacement)))))
                ((listp elt)
                 (pcase-let* ((`(,agent ,msg) elt))
                   (append acc (list (list agent (text-sage-format msg vars))))))))
@@ -328,6 +410,7 @@ second a string."
       (buffer-string)))
    (t (error "Invalid prompt %s" prompt))))
 
+;; TODO: can I delete this?
 (defun text-sage-format-prompt (prompt vars)
   (unless (text-sage-chat-prompt-p prompt)
     (error "prompt must be a valid chat prompt."))
@@ -486,6 +569,20 @@ determined by LENGTH-FUNCTION."
            (text-sage-text-split splitter split (append (cdr separators) '("")))
          (list split)))
      splits)))
+
+(defun text-sage-documents-to-inputs (documents &optional is-chat)
+  "Convert a list of DOCUMENTS to a chain input value.
+
+If IS-CHAT is non-nil, return a chat message."
+  (let* ((context-string
+          (string-join
+           (seq-map (lambda (document)
+                      (text-sage-document-content document))
+                    documents)
+           "\n\n")))
+    (if is-chat
+        `(:system ,(format "Context: %s" context-string))
+      context-string)))
 
 ;;; Parsers
 
@@ -659,6 +756,7 @@ The parsed result is passed as the first argument to CALLBACK."
      (let* ((err-msg (cadr err)))
        (text-sage-correct-parsing-error llm parser str err-msg callback)))))
 
+
 ;;; Memory
 
 (defvar text-sage-conversation-memory-human-tag "Human")
@@ -695,6 +793,111 @@ The parsed result is passed as the first argument to CALLBACK."
     `((history-messages . ,messages)
       (history . ,formatted-message))))
 
+(cl-defstruct (text-sage-conversation-buffer-window-memory
+               (:constructor text-sage-conversation-buffer-window-memory)
+               (:copier nil))
+  messages
+  (window-size 1))
+
+(cl-defmethod text-sage-save-memory-context
+  ((memory text-sage-conversation-buffer-window-memory) input output)
+  (let ((messages (text-sage-conversation-buffer-window-memory-messages memory)))
+    (setf (text-sage-conversation-buffer-window-memory-messages memory)
+          (append messages
+                  `((:user ,input)
+                    (:assistant ,output))))))
+
+(cl-defmethod text-sage-load-memory-variables ((memory text-sage-conversation-buffer-window-memory))
+  (let* ((window-size (text-sage-conversation-buffer-window-memory-window-size memory))
+         (messages (text-sage-conversation-buffer-window-memory-messages memory))
+         (formatted-message
+          (string-join
+           (seq-map
+            (pcase-lambda (`(,agent ,msg))
+              (if (equal agent :user)
+                  (format "%s: %s" text-sage-conversation-memory-human-tag msg)
+                (format "%s: %s" text-sage-conversation-memory-ai-tag msg)))
+            (seq-reverse (seq-take (seq-reverse messages) window-size)))
+           "\n")))
+    `((history-messages . ,messages)
+      (history . ,formatted-message))))
+
+(cl-defstruct (text-sage-conversation-summary-buffer-memory
+               (:constructor text-sage-conversation-summary-buffer-memory-create)
+               (:copier nil))
+  llm
+  messages
+  (max-token-limit 1000)
+  (compression-rate 0.5)
+  summary)
+
+(defconst text-sage-summarizer-prompt
+  '((:system "Progressively summarize the lines of conversation provided, adding onto the previous summary returning a new summary.\n
+EXAMPLE
+Current summary:
+The human asks what the AI thinks of artificial intelligence. The AI thinks artificial intelligence is a force for good.
+
+New lines of conversation:
+Human: Why do you think artificial intelligence is a force for good?
+AI: Because artificial intelligence will help humans reach their full potential.
+
+New summary:
+The human asks what the AI thinks of artificial intelligence. The AI thinks artificial intelligence is a force for good because it will help humans reach their full potential.
+END OF EXAMPLE")
+    (:user "Produce a new summary given the following:
+
+Current summary:
+{{summary}}
+
+New lines of conversation:
+{{new-lines}}")))
+
+(cl-defmethod text-sage-save-memory-context
+  ((memory text-sage-conversation-summary-buffer-memory) input output)
+  ""
+  (let* ((messages (append (text-sage-conversation-summary-buffer-memory-messages memory)
+                           `((:user ,input)
+                             (:assistant ,output))))
+         (max-token-limit (text-sage-conversation-summary-buffer-memory-max-token-limit memory))
+         (msg-size (text-sage-count-tokens messages)))
+    (if (> msg-size max-token-limit)
+        (let* ((compression-rate (text-sage-conversation-summary-buffer-memory-compression-rate memory))
+               (summary (text-sage-conversation-summary-buffer-memory-summary memory))
+               (llm (text-sage-conversation-summary-buffer-memory-llm memory))
+               (drop-count (ceiling (* (length messages) compression-rate)))
+               (to-be-summarized (seq-reverse (seq-take (seq-reverse messages) drop-count)))
+               (remaining (seq-drop messages drop-count)))
+          ;; TODO: This will almost certainly result in clobbered data if two requests are sent
+          ;; close enough to eachother.
+          (text-sage-generic-llm-call
+           llm text-sage-summarizer-prompt
+           `((summary . ,(or summary "<no summary>"))
+             (new-lines . ,(text-sage-format to-be-summarized nil)))
+           (lambda (res _)
+             (message "GOT SUMMARY!!!: %s" res)
+             (setf (text-sage-conversation-summary-buffer-memory-messages memory) remaining)
+             (setf (text-sage-conversation-summary-buffer-memory-summary memory) res))))
+      (message "===")
+      (setf (text-sage-conversation-summary-buffer-memory-messages memory) messages))))
+
+(cl-defmethod text-sage-load-memory-variables ((memory text-sage-conversation-summary-buffer-memory))
+  ""
+  (let* ((messages (text-sage-conversation-summary-buffer-memory-messages memory))
+         (summary (text-sage-conversation-summary-buffer-memory-summary memory))
+         (formatted-message
+          (format "%s%s"
+                  (if summary (concat "System: %s\n\n" summary) "")
+                  (string-join
+                   (seq-map
+                    (pcase-lambda (`(,agent ,msg))
+                      (if (equal agent :user)
+                          (format "%s: %s" text-sage-conversation-memory-human-tag msg)
+                        (format "%s: %s" text-sage-conversation-memory-ai-tag msg)))
+                    messages)
+                   "\n"))))
+    `((history-messages . ,(if summary (cons (list :system summary) messages) messages))
+      (history . ,formatted-message))))
+
 ;;; Chains
 
 (defvar text-sage-disable-parser nil
@@ -709,7 +912,7 @@ CALLBACK is called when request finished."
       (let* ((formatted-prompt (text-sage-chat-format prompt inputs)))
         (text-sage-llm-chat-call llm formatted-prompt callback))
     (let* ((formatted-prompt (text-sage-format prompt inputs)))
-      (text-sage-llm-call llm formatted-prompt))))
+      (text-sage-llm-call llm formatted-prompt callback))))
 
 (cl-defstruct (text-sage-llm-chain
                (:constructor text-sage-llm-chain-create)
@@ -774,6 +977,7 @@ AI:")
     (text-sage-generic-llm-call
      llm prompt inputs
      (lambda (result partial)
+       (message ">>> %s %s" result partial)
        (when (not partial)
          (if (text-sage-chat-prompt-p prompt)
              (let ((last-msg (cadar (last (text-sage-chat-format prompt inputs)))))
@@ -781,6 +985,14 @@ AI:")
            (text-sage--conversation-chain-update-memory
             chain (alist-get 'input inputs) result)))
        (funcall cb result partial)))))
+
+
+(defun text-sage-qa-stuff-chain (llm input-documents)
+  (text-sage-llm-chain-create
+   :llm llm
+   :prompt `((:system "Use the following pieces of context to answer the question at the end. If you don't know the answer, just say that you don't know, don't try to make up an answer.")
+             ,(text-sage-documents-to-inputs input-documents t)
+             (:user "{{input}}"))))
 
 ;;; Playground
 
