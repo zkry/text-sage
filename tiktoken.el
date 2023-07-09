@@ -124,7 +124,7 @@
 (defun tiktoken-byte-pair-merge (piece ranks f)
   ""
   (let* ((parts (seq-into (seq-map-indexed (lambda (_ i) (vector i most-positive-fixnum))
-                                           (make-vector (length piece) nil))
+                                           (make-vector (1+ (length piece)) nil))
                           'vector))
          (get-rank (lambda (start-idx skip)
                      (if (< (+ start-idx skip 2) (length parts))
@@ -174,7 +174,6 @@
      piece
      ranks
      (lambda (start end)
-       (message ">>> %s" (seq-subseq piece start end))
        (gethash (concat (seq-subseq piece start end)) ranks)))))
 
 (defun tiktoken-find-regex->string-index (str regexp)
@@ -183,6 +182,16 @@
     (let ((idx (string-match regexp str)))
       (when idx
         (cons idx (+ (length (match-string 0 str))))))))
+
+(defun tiktoken--find-all-regexp-matches (text regexp)
+  "Return all matches of REGEXP in text."
+  (let ((matches))
+    (with-temp-buffer
+      (insert text)
+      (goto-char (point-min))
+      (while (search-forward-regexp regexp nil t)
+        (push (match-string 0) matches)))
+    (nreverse matches)))
 
 (defun tiktoken-encode-native (encoding text allowed-special)
   ""
@@ -209,19 +218,15 @@
                      (cl-incf start-find (cdr next-special)))
                  (throw 'break1 nil)))))
          (let* ((end (if next-special (+ start (car next-special)) (length text)))
-                (matches (s-match-strings-all regex (substring text start end))))
-           (with-temp-buffer
-             (insert (substring text start end))
-             (goto-char (point-min))
-             (while (search-forward-regexp regex nil t)
-               (let ((piece (match-string 0)))
-                 (if-let ((token (gethash piece ranks)))
-                     (progn
-                       (setq last-piece-token-len 1)
-                       (setq ret (append ret (list token))))
-                   (let ((tokens (byte-pair-encode piece ranks)))
-                     (setq last-piece-token-len (length tokens))
-                     (setq ret (append ret tokens)))))))
+                (matches (tiktoken--find-all-regexp-matches (substring text start end) regex)))
+           (dolist (piece matches)
+             (if-let ((token (gethash piece ranks)))
+                 (progn
+                   (setq last-piece-token-len 1)
+                   (setq ret (append ret (list token))))
+               (let ((tokens (byte-pair-encode piece ranks)))
+                 (setq last-piece-token-len (length tokens))
+                 (setq ret (append ret tokens)))))
            (if next-special
                (let* ((temp (substr text
                                     (+ start (car next-special))
@@ -234,10 +239,9 @@
     ret))
 
 ;; (defconst cl100k_base (tiktoken-cl100k_base))
-;;
-(length
- (tiktoken-encode-native cl100k_base "arstn$#@$anrts,tanrostnu48$6uo'nflp9"
-                         (tiktoken-encoding-special-tokens cl100k_base)))
-(gethash "ar" (tiktoken-encoding-mergeable-ranks cl100k_base))
+;; (length (tiktoken-encode-native cl100k_base "arstn$#@$anrts,tanrostnu48$6uo'nflp9"
+;;                                 (tiktoken-encoding-special-tokens cl100k_base)))
+;; (gethash "ar" (tiktoken-encoding-mergeable-ranks cl100k_base))
+
 (provide 'tiktoken)
 ;;; tiktoken.el ends here
