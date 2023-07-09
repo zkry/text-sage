@@ -224,7 +224,7 @@
                  (progn
                    (setq last-piece-token-len 1)
                    (setq ret (append ret (list token))))
-               (let ((tokens (byte-pair-encode piece ranks)))
+               (let ((tokens (byte-pair-encode (string-as-unibyte piece) ranks)))
                  (setq last-piece-token-len (length tokens))
                  (setq ret (append ret tokens)))))
            (if next-special
@@ -239,8 +239,8 @@
     ret))
 
 ;; (defconst cl100k_base (tiktoken-cl100k_base))
-;; (length (tiktoken-encode-native cl100k_base "arstn$#@$anrts,tanrostnu48$6uo'nflp9"
-;;                                 (tiktoken-encoding-special-tokens cl100k_base)))
+;; (tiktoken-encode-native cl100k_base "привет!"
+;;                         (tiktoken-encoding-special-tokens cl100k_base))
 ;; (gethash "ar" (tiktoken-encoding-mergeable-ranks cl100k_base))
 
 (provide 'tiktoken)
