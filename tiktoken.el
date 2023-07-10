@@ -25,8 +25,24 @@
 
 (require 'ht)
 
-
-;;; Encoding
+(defgroup tiktoken nil
+  "Byte-pair encoding tokenization for NLP applications."
+  :group 'tools
+  :link '(url-link :tag "GitHub" "https://github.com/zkry/tiktoken.el"))
+
+(defcustom tiktoken-cache-dir
+  user-emacs-directory
+  "Directory to save downloaded encoding ranks.
+
+If set to nil or an empty string, caching will be disabled."
+  :group 'tiktoken
+  :type 'directory)
+
+(defcustom tiktoken-offline-ranks
+  nil
+  "Alist indicating the file to load for the ranks of a particular model."
+  :group 'tiktoken
+  :type '(alist :key-type string :value-type file))
 
 (defconst tiktoken-special-endoftext "<|endoftext|>")
 (defconst tiktoken-special-fim-prefix "<|fim_prefix|>")
@@ -38,6 +54,18 @@
 (defconst tiktoken-model-p50k-base "p50k_base") ; MODEL_P50K_BASE
 (defconst tiktoken-model-p50k-edit "p50k_edit") ; MODEL_P50K_EDIT
 (defconst tiktoken-model-r50k-base "r50k_base") ; MODEL_R50K_BASE
+
+(defconst tiktoken-model-urls
+  (ht
+   (tiktoken-model-cl100k-base
+    "https://openaipublic.blob.core.windows.net/encodings/cl100k_base.tiktoken")
+   (tiktoken-model-p50k-edit
+    "https://openaipublic.blob.core.windows.net/encodings/p50k_base.tiktoken")
+   (tiktoken-model-p50k-base
+    "https://openaipublic.blob.core.windows.net/encodings/p50k_base.tiktoken")
+   (tiktoken-model-r50k-base
+    "https://openaipublic.blob.core.windows.net/encodings/r50k_base.tiktoken"))
+  "Mapping from model name to URL from wich to obtain the token rankings.")
 
 (defconst tiktoken-model-to-encoding
   (ht ("gpt-3.5-turbo" tiktoken-model-cl100k-base)
@@ -75,20 +103,50 @@
   (ht ("gpt-4-" tiktoken-model-cl100k-base)
       ("gpt-3.5-turbo-" tiktoken-model-cl100k-base)))
 
-(defmemoize tiktoken-load-bpe (url)
-  (let ((ht (make-hash-table :test 'equal)))
+(defun tiktoken--parse-ranks (text)
+  "Given a rank file TEXT, parse it into a map of piece to token number."
+  (let* ((ht (make-hash-table :test 'equal)))
     (with-temp-buffer
-      (let ((resp (request url :sync t)))
-        (insert (request-response-data resp))
-        (goto-char (point-min))
-        (while (not (eobp))
-          (let ((start (point)))
-            (search-forward " ")
-            (let ((str (base64-decode-string (buffer-substring-no-properties start (1- (point)))))
-                  (val (string-to-number (buffer-substring-no-properties (point) (pos-eol)))))
-              (puthash str val ht)
-              (forward-line 1))))))
+      (insert text)
+      (goto-char (point-min))
+      (while (not (eobp))
+        (let ((start (point)))
+          (search-forward " ")
+          (let ((str (base64-decode-string (buffer-substring-no-properties start (1- (point)))))
+                (val (string-to-number (buffer-substring-no-properties (point) (pos-eol)))))
+            (puthash str val ht)
+            (forward-line 1)))))
     ht))
+
+(defmemoize tiktoken-load-model-bpe (model)
+  "Fetch the MODEL encodings ranks and return it parsed into a hash table.
+
+If `tiktoken-cache-dir' is non-nil and not empy, first look for
+the cached file under the name
+\"<tiktoken-cache-dir>/<MODEL>.txt\".  If such a file exists,
+don't fetch from the external URL and use the file instead.  If
+no cached file exists, fetch from the URL and save it to
+mentioned filename.
+
+If `tiktoken-offline-ranks' is an alist containing a value for
+the key MODEL, then parse and use that file file in place of
+fetching the URL or loading from cache."
+  (let ((cache-file (and (not (s-blank-p tiktoken-cache-dir))
+                         (concat tiktoken-cache-dir "/" model ".txt"))))
+    (cond
+     ((and cache-file (f-exists-p cache-file))
+      (tiktoken--parse-ranks (f-read cache-file)))
+     ((and (hash-table-p tiktoken-offline-ranks)
+           (gethash model tiktoken-offline-ranks))
+      (tiktoken--parse-ranks (f-read (gethash model tiktoken-offline-ranks))))
+     (t
+      (let* ((url (gethash model tiktoken-model-urls))
+             (resp (request url :sync t)))
+        (unless (<= 200 (request-response-status-code resp) 299)
+          (error "Unexpected result fetching model for %s at %s" model url))
+        (when cache-file
+          (f-write (request-response-data resp) 'utf-8 cache-file))
+        (tiktoken--parse-ranks (request-response-data resp)))))))
 
 (cl-defstruct (tiktoken-encoding
                (:constructor tiktoken-encoding-create)
@@ -97,29 +155,6 @@
   pat-str
   mergeable-ranks
   special-tokens)
-
-(defun tiktoken-cl100k_base ()
-  "Load ranks for cl100k_base and return it's encoder object."
-  (let ((ranks (tiktoken-load-bpe "https://openaipublic.blob.core.windows.net/encodings/cl100k_base.tiktoken"))
-        (special-tokens (ht (tiktoken-special-endoftext 100257)
-                            (tiktoken-special-fim-prefix 100258)
-                            (tiktoken-special-fim-middle 100259)
-                            (tiktoken-special-fim-suffix 100260)
-                            (tiktoken-special-endofprompt 100276))))
-    (tiktoken-encoding-create
-     :name tiktoken-model-cl100k-base
-     :pat-str (rx (or "'s" "'t" "'re" "'ve" "'m" "'ll" "'d"
-                      (seq (? (regex "[^\r\n[:alnum:]]"))
-                           (+ letter))
-                      (seq (repeat 1 3 digit))
-                      (seq (? " ")
-                           (+ (regex "[^[:blank:][:alnum:]]"))
-                           (* (in "\r\n")))
-                      (seq (* (in blank))
-                           (+ (in "\r\n")))
-                      (seq (+ (in blank)))))
-     :mergeable-ranks ranks
-     :special-tokens special-tokens)))
 
 (defun tiktoken-byte-pair-merge (piece ranks f)
   ""
@@ -184,7 +219,7 @@
         (cons idx (+ (length (match-string 0 str))))))))
 
 (defun tiktoken--find-all-regexp-matches (text regexp)
-  "Return all matches of REGEXP in text."
+  "Return all matches of REGEXP in TEXT."
   (let ((matches))
     (with-temp-buffer
       (insert text)
@@ -193,7 +228,7 @@
         (push (match-string 0) matches)))
     (nreverse matches)))
 
-(defun tiktoken-encode-native (encoding text allowed-special)
+(defun tiktoken--encode-native (encoding text allowed-special)
   ""
   (let* ((special-tokens (tiktoken-encoding-special-tokens encoding))
          (special-regex (regexp-opt (hash-table-keys special-tokens)))
@@ -238,7 +273,138 @@
              (throw 'break2 nil))))))
     ret))
 
-;; (defconst cl100k_base (tiktoken-cl100k_base))
+(defun tiktoken-encode (encoder text allowed-special)
+  "Use ENCODER to byte-pair encode TEXT.
+
+If ALLOWED-SPECIAL is the symbol 'all, utilize all special tokens
+defined in ENCODER.  If ALLOWED-SPECIAL is nil, do not allow any
+special tokens.  Otherwise, ALLOWED-SPECIAL should be a list of
+special tokens to use."
+  (let ((allowed-special-ht
+         (cond
+          ((eql 'all allowed-special)
+           (tiktoken-encoding-special-tokens encoder))
+          ((null allowed-special) (ht))
+          ((listp allowed-special)
+           (let ((ht (ht)))
+             (dolist (spec allowed-special)
+               (ht-set ht spec t)))))))
+    (tiktoken--encode-native encoder text allowed-special-ht)))
+
+(defun tiktoken-encode-ordinary (encoder text)
+  "Use ENCODER to byte-pair encode TEXT.
+
+No special tokens are taken into account."
+  (let* ((regex (tiktoken-encoding-pat-str encoding))
+         (ranks (tiktoken-encoding-mergeable-ranks encoding))
+         (ret '()))
+    (let* ((matches (tiktoken--find-all-regexp-matches text regex)))
+      (dolist (piece matches)
+        (if-let ((token (gethash piece ranks)))
+            (setq ret (append ret (list token)))
+          (let ((tokens (byte-pair-encode (string-as-unibyte piece) ranks)))
+            (setq ret (append ret tokens))))))
+    ret))
+
+
+;;; Encoders
+
+(defun tiktoken-cl100k-base ()
+  "Load ranks for cl100k_base and return it's encoder object."
+  (let ((ranks (tiktoken-load-model-bpe tiktoken-model-cl100k-base))
+        (special-tokens (ht (tiktoken-special-endoftext 100257)
+                            (tiktoken-special-fim-prefix 100258)
+                            (tiktoken-special-fim-middle 100259)
+                            (tiktoken-special-fim-suffix 100260)
+                            (tiktoken-special-endofprompt 100276))))
+    (tiktoken-encoding-create
+     :name tiktoken-model-cl100k-base
+     :pat-str (rx (or "'s" "'t" "'re" "'ve" "'m" "'ll" "'d"
+                      (seq (? (regex "[^\r\n[:alnum:]]"))
+                           (+ letter))
+                      (seq (repeat 1 3 digit))
+                      (seq (? " ")
+                           (+ (regex "[^[:blank:][:alnum:]]"))
+                           (* (in "\r\n")))
+                      (seq (* (in blank))
+                           (+ (in "\r\n")))
+                      (seq (+ (in blank)))))
+     :mergeable-ranks ranks
+     :special-tokens special-tokens)))
+
+(defun tiktoken-p50k-edit ()
+  "Load ranks for p50k_edit and return it's encoder object."
+  (let ((ranks (tiktoken-load-model-bpe tiktoken-model-p50k-edit))
+        (special-tokens (ht (tiktoken-special-endoftext 50256)
+                            (tiktoken-special-fim-prefix 50281)
+                            (tiktoken-special-fim-middle 50282)
+                            (tiktoken-special-fim-suffix 50283))))
+    (tiktoken-encoding-create
+     :name tiktoken-model-p50k-edit
+     :pat-str (rx (or "'s" "'t" "'re" "'ve" "'m" "'ll" "'d"
+                      (seq (? " ") (+ letter))
+                      (seq (? " ") (+ digit))
+                      (seq (? " ") (+ (regex "[^[:blank:][:alnum:]]")))
+                      (seq (+ blank))))
+     :mergeable-ranks ranks
+     :special-tokens special-tokens)))
+
+(defun tiktoken-p50k-base ()
+  "Load ranks for p50k_edit and return it's encoder object."
+  (let ((ranks (tiktoken-load-model-bpe tiktoken-model-p50k-base))
+        (special-tokens (ht (tiktoken-special-endoftext 50256))))
+    (tiktoken-encoding-create
+     :name tiktoken-model-p50k-base
+     :pat-str (rx (or "'s" "'t" "'re" "'ve" "'m" "'ll" "'d"
+                      (seq (? " ") (+ letter))
+                      (seq (? " ") (+ digit))
+                      (seq (? " ") (+ (regex "[^[:blank:][:alnum:]]")))
+                      (seq (+ blank))))
+     :mergeable-ranks ranks
+     :special-tokens special-tokens)))
+
+
+(defun tiktoken-r50k-base ()
+  "Load ranks for p50k_edit and return it's encoder object."
+  (let ((ranks (tiktoken-load-model-bpe tiktoken-model-r50k-base))
+        (special-tokens (ht (tiktoken-special-endoftext 50256))))
+    (tiktoken-encoding-create
+     :name tiktoken-model-r50k-base
+     :pat-str (rx (or "'s" "'t" "'re" "'ve" "'m" "'ll" "'d"
+                      (seq (? " ") (+ letter))
+                      (seq (? " ") (+ digit))
+                      (seq (? " ") (+ (regex "[^[:blank:][:alnum:]]")))
+                      (seq (+ blank))))
+     :mergeable-ranks ranks
+     :special-tokens special-tokens)))
+
+
+(defun tiktoken--encoding-from-name (encoding-name)
+  "Create the model of ENCODING-NAME."
+  (cond
+   ((equal encoding-name tiktoken-model-cl100k-base)
+    (tiktoken-cl100k-base))
+   ((equal encoding-name tiktoken-model-p50k-base)
+    (tiktoken-p50k-base))
+   ((equal encoding-name tiktoken-model-r50k-base)
+    (tiktoken-r50k-base))
+   ((equal encoding-name tiktoken-model-p50k-edit)
+    (tiktoken-p50k-base))
+   (t (error "Unrecognized encoding name: %s" encoding-name))))
+
+(defun tiktoken-encoding-for-model (model-name)
+  "Return the encoding object of MODEL-NAME."
+  (if-let ((encoding-name (gethash model-name tiktoken-model-to-encoding)))
+      (tiktoken--encoding-from-name encoding-name)
+    (catch 'res
+      (maphash
+       (lambda (k v)
+         (when (string-prefix-p k model-name)
+           (throw 'res (tiktoken--encoding-from-name v))))
+       tiktoken-model-prefix-to-encoding)
+      (error "No encoding for model %s" model-name))))
+
+;; (defconst cl100k_base (tiktoken-cl100k-base))
 ;; (tiktoken-encode-native cl100k_base "привет!"
 ;;                         (tiktoken-encoding-special-tokens cl100k_base))
 ;; (gethash "ar" (tiktoken-encoding-mergeable-ranks cl100k_base))
