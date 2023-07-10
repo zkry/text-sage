@@ -3,7 +3,8 @@
 ;; Author: Zachary Romero
 ;; URL: https://github.com/zkry/text-sage
 ;; Version: 0.0.1
-;; Package-Requires: ((emacs "28.0"))
+;; Package-Requires: ((emacs "28.0") (ht "2.3"))
+;;
 
 ;; This package is free software; you can redistribute it and/or modify
 ;; it under the terms of the GNU General Public License as published by
@@ -20,6 +21,7 @@
 
 ;;; Commentary:
 
+;; fun
 
 ;;; Code:
 
@@ -97,11 +99,13 @@ If set to nil or an empty string, caching will be disabled."
 	  ("text-search-babbage-doc-001" tiktoken-model-r50k-base)
 	  ("text-search-ada-doc-001" tiktoken-model-r50k-base)
 	  ("code-search-babbage-code-001" tiktoken-model-r50k-base)
-	  ("code-search-ada-code-001" tiktoken-model-r50k-base)))
+	  ("code-search-ada-code-001" tiktoken-model-r50k-base))
+  "Map of model name to encoder.")
 
 (defconst tiktoken-model-prefix-to-encoding
   (ht ("gpt-4-" tiktoken-model-cl100k-base)
-      ("gpt-3.5-turbo-" tiktoken-model-cl100k-base)))
+      ("gpt-3.5-turbo-" tiktoken-model-cl100k-base))
+  "Map of model name prefix to encoding model.")
 
 (defun tiktoken--parse-ranks (text)
   "Given a rank file TEXT, parse it into a map of piece to token number."
@@ -112,13 +116,15 @@ If set to nil or an empty string, caching will be disabled."
       (while (not (eobp))
         (let ((start (point)))
           (search-forward " ")
-          (let ((str (base64-decode-string (buffer-substring-no-properties start (1- (point)))))
-                (val (string-to-number (buffer-substring-no-properties (point) (pos-eol)))))
+          (let ((str (base64-decode-string
+                      (buffer-substring-no-properties start (1- (point)))))
+                (val (string-to-number
+                      (buffer-substring-no-properties (point) (pos-eol)))))
             (puthash str val ht)
             (forward-line 1)))))
     ht))
 
-(defmemoize tiktoken-load-model-bpe (model)
+(defun tiktoken-load-model-bpe (model)
   "Fetch the MODEL encodings ranks and return it parsed into a hash table.
 
 If `tiktoken-cache-dir' is non-nil and not empy, first look for
@@ -137,10 +143,10 @@ fetching the URL or loading from cache."
      ((and cache-file (f-exists-p cache-file))
       (tiktoken--parse-ranks (f-read cache-file)))
      ((and (hash-table-p tiktoken-offline-ranks)
-           (gethash model tiktoken-offline-ranks))
-      (tiktoken--parse-ranks (f-read (gethash model tiktoken-offline-ranks))))
+           (ht-get tiktoken-offline-ranks model))
+      (tiktoken--parse-ranks (f-read (ht-get tiktoken-offline-ranks model))))
      (t
-      (let* ((url (gethash model tiktoken-model-urls))
+      (let* ((url (ht-get tiktoken-model-urls model))
              (resp (request url :sync t)))
         (unless (<= 200 (request-response-status-code resp) 299)
           (error "Unexpected result fetching model for %s at %s" model url))
@@ -151,22 +157,29 @@ fetching the URL or loading from cache."
 (cl-defstruct (tiktoken-encoding
                (:constructor tiktoken-encoding-create)
                (:copier nil))
+  "Structure containing all data required to byte-pair encode text."
   name
   pat-str
   mergeable-ranks
   special-tokens)
 
-(defun tiktoken-byte-pair-merge (piece ranks f)
-  ""
-  (let* ((parts (seq-into (seq-map-indexed (lambda (_ i) (vector i most-positive-fixnum))
-                                           (make-vector (1+ (length piece)) nil))
+(defun tiktoken--byte-pair-merge (piece ranks f)
+  "Merge bytes of PIECE according to RANKS.
+
+F is a function taking two parameters, start and end, used to
+fetch the token id from the bytes of PIECE between range start
+and end."
+  (let* ((parts (seq-into (seq-map-indexed
+                           (lambda (_ i) (vector i most-positive-fixnum))
+                           (make-vector (1+ (length piece)) nil))
                           'vector))
          (get-rank (lambda (start-idx skip)
                      (if (< (+ start-idx skip 2) (length parts))
-                         (let* ((b (seq-subseq piece
-                                               (aref (aref parts start-idx) 0)
-                                               (aref (aref parts (+ start-idx skip 2)) 0)))
-                                (rank (gethash (concat b) ranks)))
+                         (let* ((b (seq-subseq
+                                    piece
+                                    (aref (aref parts start-idx) 0)
+                                    (aref (aref parts (+ start-idx skip 2)) 0)))
+                                (rank (ht-get ranks (concat b))))
                            (or rank -1))
                        -1))))
     (cl-loop for i from 0 below (- (length parts) 2) do
@@ -198,18 +211,23 @@ fetching the URL or loading from cache."
            (throw 'done nil)))))
     (let ((out (make-vector (1- (length parts)) nil)))
       (cl-loop for i from 0 below (length out) do
-               (setf (aref out i) (funcall f (aref (aref parts i) 0)
-                                           (aref (aref parts (1+ i)) 0))))
+               (setf (aref out i)
+                     (funcall f
+                              (aref (aref parts i) 0)
+                              (aref (aref parts (1+ i)) 0))))
       (seq-into out 'list))))
 
-(defun byte-pair-encode (piece ranks)
+(defun tiktoken--byte-pair-encode (piece ranks)
+  "Return list of token ids of PIECE split by RANKS.
+
+RANKS is a mapping of unibyte strings to token id."
   (if (eq (length piece) 1)
-      (vector (gethash (concat piece) ranks))
-    (tiktoken-byte-pair-merge
+      (vector (ht-get ranks (concat piece)))
+    (tiktoken--byte-pair-merge
      piece
      ranks
      (lambda (start end)
-       (gethash (concat (seq-subseq piece start end)) ranks)))))
+       (ht-get ranks (concat (seq-subseq piece start end)))))))
 
 (defun tiktoken-find-regex->string-index (str regexp)
   "Find match of REGEXP in STR, returning start and end indecies."
@@ -245,54 +263,62 @@ fetching the URL or loading from cache."
            (while t
              ;; Find the next allowed special token, if any
              (let ((temp (substring text start-find (length text))))
-               (setq next-special (tiktoken-find-regex->string-index temp special-regex))
+               (setq next-special
+                     (tiktoken-find-regex->string-index temp special-regex))
                (if next-special
-                   (let ((token (substring text (+ start-find (car next-special)) (+ start-find (cdr next-special)))))
-                     (when (gethash token allowed-special)
+                   (let ((token (substring text
+                                           (+ start-find (car next-special))
+                                           (+ start-find (cdr next-special)))))
+                     (when (ht-get allowed-special token)
                        (throw 'break1 nil))
                      (cl-incf start-find (cdr next-special)))
                  (throw 'break1 nil)))))
-         (let* ((end (if next-special (+ start (car next-special)) (length text)))
-                (matches (tiktoken--find-all-regexp-matches (substring text start end) regex)))
+         (let* ((end (if next-special
+                         (+ start (car next-special))
+                       (length text)))
+                (matches (tiktoken--find-all-regexp-matches
+                          (substring text start end)
+                          regex)))
            (dolist (piece matches)
-             (if-let ((token (gethash piece ranks)))
+             (if-let ((token (ht-get ranks piece)))
                  (progn
                    (setq last-piece-token-len 1)
                    (setq ret (append ret (list token))))
-               (let ((tokens (byte-pair-encode (string-as-unibyte piece) ranks)))
+               (let ((tokens (tiktoken--byte-pair-encode
+                              (string-as-unibyte piece) ranks)))
                  (setq last-piece-token-len (length tokens))
                  (setq ret (append ret tokens)))))
            (if next-special
                (let* ((temp (substr text
                                     (+ start (car next-special))
                                     (+ start (cdr next-special))))
-                      (token (gethash temp special-tokens))
+                      (token (ht-get special-tokens temp))
                       (setq ret (append ret (list token)))
                       (cl-incf start (cdr next-special))
                       (setq last-piece-token-len 0)))
              (throw 'break2 nil))))))
     ret))
 
-(defun tiktoken-encode (encoder text allowed-special)
-  "Use ENCODER to byte-pair encode TEXT.
+(defun tiktoken-encode (encoding text allowed-special)
+  "Use ENCODING to byte-pair encode TEXT.
 
 If ALLOWED-SPECIAL is the symbol 'all, utilize all special tokens
-defined in ENCODER.  If ALLOWED-SPECIAL is nil, do not allow any
+defined in ENCODING  If ALLOWED-SPECIAL is nil, do not allow any
 special tokens.  Otherwise, ALLOWED-SPECIAL should be a list of
 special tokens to use."
   (let ((allowed-special-ht
          (cond
           ((eql 'all allowed-special)
-           (tiktoken-encoding-special-tokens encoder))
+           (tiktoken-encoding-special-tokens encoding))
           ((null allowed-special) (ht))
           ((listp allowed-special)
            (let ((ht (ht)))
              (dolist (spec allowed-special)
                (ht-set ht spec t)))))))
-    (tiktoken--encode-native encoder text allowed-special-ht)))
+    (tiktoken--encode-native encoding text allowed-special-ht)))
 
-(defun tiktoken-encode-ordinary (encoder text)
-  "Use ENCODER to byte-pair encode TEXT.
+(defun tiktoken-encode-ordinary (encoding text)
+  "Use ENCODING to byte-pair encode TEXT.
 
 No special tokens are taken into account."
   (let* ((regex (tiktoken-encoding-pat-str encoding))
@@ -300,16 +326,29 @@ No special tokens are taken into account."
          (ret '()))
     (let* ((matches (tiktoken--find-all-regexp-matches text regex)))
       (dolist (piece matches)
-        (if-let ((token (gethash piece ranks)))
+        (if-let ((token (ht-get ranks piece)))
             (setq ret (append ret (list token)))
-          (let ((tokens (byte-pair-encode (string-as-unibyte piece) ranks)))
+          (let ((tokens (tiktoken--byte-pair-encode (string-as-unibyte piece) ranks)))
             (setq ret (append ret tokens))))))
     ret))
+
+(defun tiktoken-decode (encoding ids)
+  "Decode a list of number IDS to underlying string using ENCODING."
+  (let* ((ranks (tiktoken-encoding-mergeable-ranks encoding)))
+    (let* ((inv-ht (ht)))
+      (ht-map (lambda (k v)
+                (ht-set inv-ht v k))
+              ranks)
+      (string-to-multibyte
+       (string-join
+        (seq-map (lambda (id)
+                   (ht-get inv-ht id))
+                 ids))))))
 
 
 ;;; Encoders
 
-(defun tiktoken-cl100k-base ()
+(defmemoize tiktoken-cl100k-base ()
   "Load ranks for cl100k_base and return it's encoder object."
   (let ((ranks (tiktoken-load-model-bpe tiktoken-model-cl100k-base))
         (special-tokens (ht (tiktoken-special-endoftext 100257)
@@ -332,7 +371,7 @@ No special tokens are taken into account."
      :mergeable-ranks ranks
      :special-tokens special-tokens)))
 
-(defun tiktoken-p50k-edit ()
+(defmemoize tiktoken-p50k-edit ()
   "Load ranks for p50k_edit and return it's encoder object."
   (let ((ranks (tiktoken-load-model-bpe tiktoken-model-p50k-edit))
         (special-tokens (ht (tiktoken-special-endoftext 50256)
@@ -349,7 +388,7 @@ No special tokens are taken into account."
      :mergeable-ranks ranks
      :special-tokens special-tokens)))
 
-(defun tiktoken-p50k-base ()
+(defmemoize tiktoken-p50k-base ()
   "Load ranks for p50k_edit and return it's encoder object."
   (let ((ranks (tiktoken-load-model-bpe tiktoken-model-p50k-base))
         (special-tokens (ht (tiktoken-special-endoftext 50256))))
@@ -363,8 +402,7 @@ No special tokens are taken into account."
      :mergeable-ranks ranks
      :special-tokens special-tokens)))
 
-
-(defun tiktoken-r50k-base ()
+(defmemoize tiktoken-r50k-base ()
   "Load ranks for p50k_edit and return it's encoder object."
   (let ((ranks (tiktoken-load-model-bpe tiktoken-model-r50k-base))
         (special-tokens (ht (tiktoken-special-endoftext 50256))))
@@ -394,7 +432,7 @@ No special tokens are taken into account."
 
 (defun tiktoken-encoding-for-model (model-name)
   "Return the encoding object of MODEL-NAME."
-  (if-let ((encoding-name (gethash model-name tiktoken-model-to-encoding)))
+  (if-let ((encoding-name (ht-get tiktoken-model-to-encoding model-name)))
       (tiktoken--encoding-from-name encoding-name)
     (catch 'res
       (maphash
@@ -403,11 +441,6 @@ No special tokens are taken into account."
            (throw 'res (tiktoken--encoding-from-name v))))
        tiktoken-model-prefix-to-encoding)
       (error "No encoding for model %s" model-name))))
-
-;; (defconst cl100k_base (tiktoken-cl100k-base))
-;; (tiktoken-encode-native cl100k_base "привет!"
-;;                         (tiktoken-encoding-special-tokens cl100k_base))
-;; (gethash "ar" (tiktoken-encoding-mergeable-ranks cl100k_base))
 
 (provide 'tiktoken)
 ;;; tiktoken.el ends here
