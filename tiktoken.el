@@ -163,12 +163,15 @@ fetching the URL or loading from cache."
   mergeable-ranks
   special-tokens)
 
-(defun tiktoken--byte-pair-merge (piece ranks f)
+(defun tiktoken--byte-pair-merge (piece ranks f &optional counts-only)
   "Merge bytes of PIECE according to RANKS.
 
 F is a function taking two parameters, start and end, used to
 fetch the token id from the bytes of PIECE between range start
-and end."
+and end.
+
+If COUNTS-ONLY is not-nil, return the length of the encoding, not
+the encoding itself."
   (let* ((parts (seq-into (seq-map-indexed
                            (lambda (_ i) (vector i most-positive-fixnum))
                            (make-vector (1+ (length piece)) nil))
@@ -209,25 +212,34 @@ and end."
                                             (seq-subseq parts 0 (1+ i))
                                             (seq-subseq parts (+ i 2)))))
            (throw 'done nil)))))
-    (let ((out (make-vector (1- (length parts)) nil)))
-      (cl-loop for i from 0 below (length out) do
-               (setf (aref out i)
-                     (funcall f
-                              (aref (aref parts i) 0)
-                              (aref (aref parts (1+ i)) 0))))
-      (seq-into out 'list))))
+    (if counts-only
+        (1- (length parts))
+      (let ((out (make-vector (1- (length parts)) nil)))
+        (cl-loop for i from 0 below (length out) do
+                 ;; store in reverse order!
+                 (setf (aref out (- (length out) i 1))
+                       (funcall f
+                                (aref (aref parts i) 0)
+                                (aref (aref parts (1+ i)) 0))))
+        (seq-into out 'list)))))
 
-(defun tiktoken--byte-pair-encode (piece ranks)
+(defun tiktoken--byte-pair-encode (piece ranks &optional counts-only)
   "Return list of token ids of PIECE split by RANKS.
 
-RANKS is a mapping of unibyte strings to token id."
+RANKS is a mapping of unibyte strings to token id.
+
+If COUNTS-ONLY is not-nil, return the length of the encoding, not
+the encoding itself."
   (if (eq (length piece) 1)
-      (vector (ht-get ranks (concat piece)))
+      (if counts-only
+          1
+        (vector (ht-get ranks (concat piece))))
     (tiktoken--byte-pair-merge
      piece
      ranks
      (lambda (start end)
-       (ht-get ranks (concat (seq-subseq piece start end)))))))
+       (ht-get ranks (concat (seq-subseq piece start end))))
+     counts-only)))
 
 (defun tiktoken-find-regex->string-index (str regexp)
   "Find match of REGEXP in STR, returning start and end indecies."
@@ -247,7 +259,9 @@ RANKS is a mapping of unibyte strings to token id."
     (nreverse matches)))
 
 (defun tiktoken--encode-native (encoding text allowed-special)
-  ""
+  "Encode TEXT according to ENCODING.
+
+Only special items of ALLOWED-SPECIAL are permitted."
   (let* ((special-tokens (tiktoken-encoding-special-tokens encoding))
          (special-regex (regexp-opt (hash-table-keys special-tokens)))
          (regex (tiktoken-encoding-pat-str encoding))
@@ -283,20 +297,37 @@ RANKS is a mapping of unibyte strings to token id."
              (if-let ((token (ht-get ranks piece)))
                  (progn
                    (setq last-piece-token-len 1)
-                   (setq ret (append ret (list token))))
+                   (setq ret (cons token ret)))
                (let ((tokens (tiktoken--byte-pair-encode
                               (string-as-unibyte piece) ranks)))
                  (setq last-piece-token-len (length tokens))
-                 (setq ret (append ret tokens)))))
+                 (setq ret (append tokens ret)))))
            (if next-special
                (let* ((temp (substr text
                                     (+ start (car next-special))
                                     (+ start (cdr next-special))))
                       (token (ht-get special-tokens temp))
-                      (setq ret (append ret (list token)))
+                      (setq ret (cons token ret))
                       (cl-incf start (cdr next-special))
                       (setq last-piece-token-len 0)))
              (throw 'break2 nil))))))
+    (nreverse ret)))
+
+(defun tiktoken-count-tokens (encoding text)
+  "Use ENCODING to return the token length of TEXT.
+
+For long texts, counting tokens using this function is much
+faster."
+  (let* ((regex (tiktoken-encoding-pat-str encoding))
+         (ranks (tiktoken-encoding-mergeable-ranks encoding))
+         (ret 0))
+    (let* ((matches (tiktoken--find-all-regexp-matches text regex)))
+      (dolist (piece matches)
+        (if-let ((token (ht-get ranks piece)))
+            ;; TODO try to reverse append, and nreverse the result for better perf
+            (cl-incf ret)
+          (let ((tokens (tiktoken--byte-pair-encode (string-as-unibyte piece) ranks t)))
+            (cl-incf ret (length tokens))))))
     ret))
 
 (defun tiktoken-encode (encoding text allowed-special)
@@ -327,10 +358,11 @@ No special tokens are taken into account."
     (let* ((matches (tiktoken--find-all-regexp-matches text regex)))
       (dolist (piece matches)
         (if-let ((token (ht-get ranks piece)))
-            (setq ret (append ret (list token)))
+            ;; TODO try to reverse append, and nreverse the result for better perf
+            (setq ret (cons token ret))
           (let ((tokens (tiktoken--byte-pair-encode (string-as-unibyte piece) ranks)))
-            (setq ret (append ret tokens))))))
-    ret))
+            (setq ret (append tokens ret))))))
+    (nreverse ret)))
 
 (defun tiktoken-decode (encoding ids)
   "Decode a list of number IDS to underlying string using ENCODING."
