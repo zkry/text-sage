@@ -1,9 +1,9 @@
-;;; tiktoken.el --- Count OpenAI Tokens -*- lexical-binding: t; -*-
+;;; tiktoken.el --- Count BPE Tokens -*- lexical-binding: t; -*-
 
 ;; Author: Zachary Romero
 ;; URL: https://github.com/zkry/tiktoken.el
 ;; Version: 0.0.1
-;; Package-Requires: ((emacs "28.0") (ht "2.0") (f "0.20.0"))
+;; Package-Requires: ((emacs "28.0") (f "0.20.0"))
 ;;
 
 ;; This package is free software; you can redistribute it and/or modify
@@ -104,53 +104,54 @@ If set to nil or an empty string, caching will be disabled."
 (defconst tiktoken-model-r50k-base "r50k_base") ; MODEL_R50K_BASE
 
 (defconst tiktoken-model-urls
-  (ht
-   (tiktoken-model-cl100k-base
-    "https://openaipublic.blob.core.windows.net/encodings/cl100k_base.tiktoken")
-   (tiktoken-model-p50k-edit
-    "https://openaipublic.blob.core.windows.net/encodings/p50k_base.tiktoken")
-   (tiktoken-model-p50k-base
-    "https://openaipublic.blob.core.windows.net/encodings/p50k_base.tiktoken")
-   (tiktoken-model-r50k-base
-    "https://openaipublic.blob.core.windows.net/encodings/r50k_base.tiktoken"))
+  (let ((ht (make-hash-table :test 'equal)))
+   (puthash tiktoken-model-cl100k-base "https://openaipublic.blob.core.windows.net/encodings/cl100k_base.tiktoken" ht)
+   (puthash tiktoken-model-p50k-edit "https://openaipublic.blob.core.windows.net/encodings/p50k_base.tiktoken" ht)
+   (puthash tiktoken-model-p50k-base "https://openaipublic.blob.core.windows.net/encodings/p50k_base.tiktoken" ht)
+   (puthash tiktoken-model-r50k-base "https://openaipublic.blob.core.windows.net/encodings/r50k_base.tiktoken" ht)
+   ht)
   "Mapping from model name to URL from wich to obtain the token rankings.")
 
 (defconst tiktoken-model-to-encoding
-  (ht ("gpt-3.5-turbo" tiktoken-model-cl100k-base)
-	  ("text-davinci-003" tiktoken-model-p50k-base)
-	  ("text-davinci-002" tiktoken-model-p50k-base)
-	  ("text-davinci-001" tiktoken-model-r50k-base)
-	  ("text-curie-001" tiktoken-model-r50k-base)
-	  ("text-babbage-001" tiktoken-model-r50k-base)
-	  ("text-ada-001" tiktoken-model-r50k-base)
-	  ("davinci" tiktoken-model-r50k-base)
-	  ("curie" tiktoken-model-r50k-base)
-	  ("babbage" tiktoken-model-r50k-base)
-	  ("ada" tiktoken-model-r50k-base)
-      ("code-davinci-002" tiktoken-model-p50k-base)
-	  ("code-davinci-001" tiktoken-model-p50k-base)
-	  ("code-cushman-002" tiktoken-model-p50k-base)
-	  ("code-cushman-001" tiktoken-model-p50k-base)
-	  ("davinci-codex" tiktoken-model-p50k-base)
-	  ("cushman-codex" tiktoken-model-p50k-base)
-	  ("text-davinci-edit-001" tiktoken-model-p50k-edit)
-	  ("code-davinci-edit-001" tiktoken-model-p50k-edit)
-	  ("text-embedding-ada-002" tiktoken-model-cl100k-base)
-	  ("text-similarity-davinci-001" tiktoken-model-r50k-base)
-	  ("text-similarity-curie-001" tiktoken-model-r50k-base)
-	  ("text-similarity-babbage-001" tiktoken-model-r50k-base)
-	  ("text-similarity-ada-001" tiktoken-model-r50k-base)
-	  ("text-search-davinci-doc-001" tiktoken-model-r50k-base)
-	  ("text-search-curie-doc-001" tiktoken-model-r50k-base)
-	  ("text-search-babbage-doc-001" tiktoken-model-r50k-base)
-	  ("text-search-ada-doc-001" tiktoken-model-r50k-base)
-	  ("code-search-babbage-code-001" tiktoken-model-r50k-base)
-	  ("code-search-ada-code-001" tiktoken-model-r50k-base))
-  "Map of model name to encoder.")
+  (let ((ht (make-hash-table :test 'equal)))
+    (puthash "gpt-3.5-turbo" tiktoken-model-cl100k-base ht)
+    (puthash "text-davinci-003" tiktoken-model-p50k-base ht)
+    (puthash "text-davinci-002" tiktoken-model-p50k-base ht)
+    (puthash "text-davinci-001" tiktoken-model-r50k-base ht)
+    (puthash "text-curie-001" tiktoken-model-r50k-base ht)
+    (puthash "text-babbage-001" tiktoken-model-r50k-base ht)
+    (puthash "text-ada-001" tiktoken-model-r50k-base ht)
+    (puthash "davinci" tiktoken-model-r50k-base ht)
+    (puthash "curie" tiktoken-model-r50k-base ht)
+    (puthash "babbage" tiktoken-model-r50k-base ht)
+    (puthash "ada" tiktoken-model-r50k-base ht)
+    (puthash "code-davinci-002" tiktoken-model-p50k-base ht)
+    (puthash "code-davinci-001" tiktoken-model-p50k-base ht)
+    (puthash "code-cushman-002" tiktoken-model-p50k-base ht)
+    (puthash "code-cushman-001" tiktoken-model-p50k-base ht)
+    (puthash "davinci-codex" tiktoken-model-p50k-base ht)
+    (puthash "cushman-codex" tiktoken-model-p50k-base ht)
+    (puthash "text-davinci-edit-001" tiktoken-model-p50k-edit ht)
+    (puthash "code-davinci-edit-001" tiktoken-model-p50k-edit ht)
+    (puthash "text-embedding-ada-002" tiktoken-model-cl100k-base ht)
+    (puthash "text-similarity-davinci-001" tiktoken-model-r50k-base ht)
+    (puthash "text-similarity-curie-001" tiktoken-model-r50k-base ht)
+    (puthash "text-similarity-babbage-001" tiktoken-model-r50k-base ht)
+    (puthash "text-similarity-ada-001" tiktoken-model-r50k-base ht)
+    (puthash "text-search-davinci-doc-001" tiktoken-model-r50k-base ht)
+    (puthash "text-search-curie-doc-001" tiktoken-model-r50k-base ht)
+    (puthash "text-search-babbage-doc-001" tiktoken-model-r50k-base ht)
+    (puthash "text-search-ada-doc-001" tiktoken-model-r50k-base ht)
+    (puthash "code-search-babbage-code-001" tiktoken-model-r50k-base ht)
+    (puthash "code-search-ada-code-001" tiktoken-model-r50k-base ht)
+    ht
+    "Map of model name to encoder."))
 
 (defconst tiktoken-model-prefix-to-encoding
-  (ht ("gpt-4-" tiktoken-model-cl100k-base)
-      ("gpt-3.5-turbo-" tiktoken-model-cl100k-base))
+  (let ((ht (make-hash-table :test 'equal)))
+    (puthash "gpt-4-" tiktoken-model-cl100k-base ht)
+    (puthash "gpt-3.5-turbo-" tiktoken-model-cl100k-base ht)
+    ht)
   "Map of model name prefix to encoding model.")
 
 (defun tiktoken--parse-ranks (text)
@@ -189,10 +190,10 @@ fetching the URL or loading from cache."
      ((and cache-file (f-exists-p cache-file))
       (tiktoken--parse-ranks (f-read cache-file)))
      ((and (hash-table-p tiktoken-offline-ranks)
-           (ht-get tiktoken-offline-ranks model))
-      (tiktoken--parse-ranks (f-read (ht-get tiktoken-offline-ranks model))))
+           (gethash model tiktoken-offline-ranks))
+      (tiktoken--parse-ranks (f-read (gethash model tiktoken-offline-ranks))))
      (t
-      (let* ((url (ht-get tiktoken-model-urls model))
+      (let* ((url (gethash model tiktoken-model-urls))
              (resp (request url :sync t)))
         (unless (<= 200 (request-response-status-code resp) 299)
           (error "Unexpected result fetching model for %s at %s" model url))
@@ -228,7 +229,7 @@ the encoding itself."
                                     piece
                                     (aref (aref parts start-idx) 0)
                                     (aref (aref parts (+ start-idx skip 2)) 0)))
-                                (rank (ht-get ranks (concat b))))
+                                (rank (gethash (concat b) ranks)))
                            (or rank -1))
                        -1))))
     (cl-loop for i from 0 below (- (length parts) 2) do
@@ -279,12 +280,12 @@ the encoding itself."
   (if (eq (length piece) 1)
       (if counts-only
           1
-        (vector (ht-get ranks (concat piece))))
+        (vector (gethash (concat piece) ranks)))
     (tiktoken--byte-pair-merge
      piece
      ranks
      (lambda (start end)
-       (ht-get ranks (concat (seq-subseq piece start end))))
+       (gethash (concat (seq-subseq piece start end)) ranks))
      counts-only)))
 
 (defun tiktoken-find-regex->string-index (str regexp)
@@ -329,7 +330,7 @@ Only special items of ALLOWED-SPECIAL are permitted."
                    (let ((token (substring text
                                            (+ start-find (car next-special))
                                            (+ start-find (cdr next-special)))))
-                     (when (ht-get allowed-special token)
+                     (when (gethash token allowed-special)
                        (throw 'break1 nil))
                      (cl-incf start-find (cdr next-special)))
                  (throw 'break1 nil)))))
@@ -340,7 +341,7 @@ Only special items of ALLOWED-SPECIAL are permitted."
                           (substring text start end)
                           regex)))
            (dolist (piece matches)
-             (if-let ((token (ht-get ranks piece)))
+             (if-let ((token (gethash piece ranks)))
                  (progn
                    (setq last-piece-token-len 1)
                    (setq ret (cons token ret)))
@@ -352,7 +353,7 @@ Only special items of ALLOWED-SPECIAL are permitted."
                (let* ((temp (substr text
                                     (+ start (car next-special))
                                     (+ start (cdr next-special))))
-                      (token (ht-get special-tokens temp))
+                      (token (gethash temp special-tokens))
                       (setq ret (cons token ret))
                       (cl-incf start (cdr next-special))
                       (setq last-piece-token-len 0)))
@@ -369,11 +370,11 @@ faster."
          (ret 0))
     (let* ((matches (tiktoken--find-all-regexp-matches text regex)))
       (dolist (piece matches)
-        (if-let ((token (ht-get ranks piece)))
+        (if-let ((token (gethash piece ranks)))
             ;; TODO try to reverse append, and nreverse the result for better perf
             (cl-incf ret)
-          (let ((tokens (tiktoken--byte-pair-encode (string-as-unibyte piece) ranks t)))
-            (cl-incf ret (length tokens))))))
+          (let ((size (tiktoken--byte-pair-encode (string-as-unibyte piece) ranks t)))
+            (cl-incf ret size)))))
     ret))
 
 (defun tiktoken-encode (encoding text allowed-special)
@@ -387,11 +388,11 @@ special tokens to use."
          (cond
           ((eql 'all allowed-special)
            (tiktoken-encoding-special-tokens encoding))
-          ((null allowed-special) (ht))
+          ((null allowed-special) (make-hash-table :test 'equal))
           ((listp allowed-special)
-           (let ((ht (ht)))
+           (let ((ht (make-hash-table :test 'equal)))
              (dolist (spec allowed-special)
-               (ht-set ht spec t)))))))
+               (puthash spec t  ht)))))))
     (tiktoken--encode-native encoding text allowed-special-ht)))
 
 (defun tiktoken-encode-ordinary (encoding text)
@@ -403,7 +404,7 @@ No special tokens are taken into account."
          (ret '()))
     (let* ((matches (tiktoken--find-all-regexp-matches text regex)))
       (dolist (piece matches)
-        (if-let ((token (ht-get ranks piece)))
+        (if-let ((token (gethash piece ranks)))
             ;; TODO try to reverse append, and nreverse the result for better perf
             (setq ret (cons token ret))
           (let ((tokens (tiktoken--byte-pair-encode (string-as-unibyte piece) ranks)))
@@ -413,14 +414,14 @@ No special tokens are taken into account."
 (defun tiktoken-decode (encoding ids)
   "Decode a list of number IDS to underlying string using ENCODING."
   (let* ((ranks (tiktoken-encoding-mergeable-ranks encoding)))
-    (let* ((inv-ht (ht)))
-      (ht-map (lambda (k v)
-                (ht-set inv-ht v k))
+    (let* ((inv-ht (make-hash-table :test 'equal)))
+      (maphash (lambda (k v)
+                (puthash v k  inv-ht))
               ranks)
       (string-to-multibyte
        (string-join
         (seq-map (lambda (id)
-                   (ht-get inv-ht id))
+                   (gethash id inv-ht))
                  ids))))))
 
 
@@ -429,11 +430,13 @@ No special tokens are taken into account."
 (defmemoize tiktoken-cl100k-base ()
   "Load ranks for cl100k_base and return it's encoder object."
   (let ((ranks (tiktoken-load-model-bpe tiktoken-model-cl100k-base))
-        (special-tokens (ht (tiktoken-special-endoftext 100257)
-                            (tiktoken-special-fim-prefix 100258)
-                            (tiktoken-special-fim-middle 100259)
-                            (tiktoken-special-fim-suffix 100260)
-                            (tiktoken-special-endofprompt 100276))))
+        (special-tokens (let ((ht (make-hash-table :test 'equal)))
+                          (puthash tiktoken-special-endoftext 100257 ht)
+                          (puthash tiktoken-special-fim-prefix 100258 ht)
+                          (puthash tiktoken-special-fim-middle 100259 ht)
+                          (puthash tiktoken-special-fim-suffix 100260 ht)
+                          (puthash tiktoken-special-endofprompt 100276 ht)
+                          ht)))
     (tiktoken-encoding-create
      :name tiktoken-model-cl100k-base
      :pat-str (rx (or "'s" "'t" "'re" "'ve" "'m" "'ll" "'d"
@@ -452,10 +455,12 @@ No special tokens are taken into account."
 (defmemoize tiktoken-p50k-edit ()
   "Load ranks for p50k_edit and return it's encoder object."
   (let ((ranks (tiktoken-load-model-bpe tiktoken-model-p50k-edit))
-        (special-tokens (ht (tiktoken-special-endoftext 50256)
-                            (tiktoken-special-fim-prefix 50281)
-                            (tiktoken-special-fim-middle 50282)
-                            (tiktoken-special-fim-suffix 50283))))
+        (special-tokens (let ((ht (make-hash-table :test 'equal)))
+                          (puthash tiktoken-special-endoftext 50256 ht)
+                          (puthash tiktoken-special-fim-prefix 50281 ht)
+                          (puthash tiktoken-special-fim-middle 50282 ht)
+                          (puthash tiktoken-special-fim-suffix 50283 ht)
+                          ht)))
     (tiktoken-encoding-create
      :name tiktoken-model-p50k-edit
      :pat-str (rx (or "'s" "'t" "'re" "'ve" "'m" "'ll" "'d"
@@ -469,7 +474,9 @@ No special tokens are taken into account."
 (defmemoize tiktoken-p50k-base ()
   "Load ranks for p50k_edit and return it's encoder object."
   (let ((ranks (tiktoken-load-model-bpe tiktoken-model-p50k-base))
-        (special-tokens (ht (tiktoken-special-endoftext 50256))))
+        (special-tokens (let ((ht (make-hash-table :test 'equal)))
+                          (puthash tiktoken-special-endoftext 50256 ht)
+                          ht)))
     (tiktoken-encoding-create
      :name tiktoken-model-p50k-base
      :pat-str (rx (or "'s" "'t" "'re" "'ve" "'m" "'ll" "'d"
@@ -483,7 +490,8 @@ No special tokens are taken into account."
 (defmemoize tiktoken-r50k-base ()
   "Load ranks for p50k_edit and return it's encoder object."
   (let ((ranks (tiktoken-load-model-bpe tiktoken-model-r50k-base))
-        (special-tokens (ht (tiktoken-special-endoftext 50256))))
+        (special-tokens (let ((ht (make-hash-table :test 'equal)))
+                          (puthash tiktoken-special-endoftext 50256 ht))))
     (tiktoken-encoding-create
      :name tiktoken-model-r50k-base
      :pat-str (rx (or "'s" "'t" "'re" "'ve" "'m" "'ll" "'d"
@@ -510,7 +518,7 @@ No special tokens are taken into account."
 
 (defun tiktoken-encoding-for-model (model-name)
   "Return the encoding object of MODEL-NAME."
-  (if-let ((encoding-name (ht-get tiktoken-model-to-encoding model-name)))
+  (if-let ((encoding-name (gethash model-name tiktoken-model-to-encoding)))
       (tiktoken--encoding-from-name encoding-name)
     (catch 'res
       (maphash
