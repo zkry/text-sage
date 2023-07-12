@@ -293,7 +293,7 @@ the encoding itself."
   (save-match-data
     (let ((idx (string-match regexp str)))
       (when idx
-        (cons idx (+ (length (match-string 0 str))))))))
+        (cons idx (+ idx (length (match-string 0 str))))))))
 
 (defun tiktoken--find-all-regexp-matches (text regexp)
   "Return all matches of REGEXP in TEXT."
@@ -350,13 +350,13 @@ Only special items of ALLOWED-SPECIAL are permitted."
                  (setq last-piece-token-len (length tokens))
                  (setq ret (append tokens ret)))))
            (if next-special
-               (let* ((temp (substr text
-                                    (+ start (car next-special))
-                                    (+ start (cdr next-special))))
-                      (token (gethash temp special-tokens))
-                      (setq ret (cons token ret))
-                      (cl-incf start (cdr next-special))
-                      (setq last-piece-token-len 0)))
+               (let* ((temp (substring text
+                                       (+ start (car next-special))
+                                       (+ start (cdr next-special))))
+                      (token (gethash temp special-tokens)))
+                 (setq ret (cons token ret))
+                 (cl-incf start (cdr next-special))
+                 (setq last-piece-token-len 0))
              (throw 'break2 nil))))))
     (nreverse ret)))
 
