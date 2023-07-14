@@ -33,7 +33,7 @@
 ;;; taken from shell-maker.el
 (defun text-sage-async-shell-command (callback args extract-response &optional streaming on-complete)
   "Run ARGS in a shell asynchronously and call CALLBACK with the output."
-  (let* ((buffer (shell-maker-buffer shell-maker-config))
+  (let* ((buffer (and shell-maker-config (shell-maker-buffer shell-maker-config)))
          (request-id (cl-random 1000000))
          (process
           (apply #'start-process
@@ -72,13 +72,15 @@
       (set-process-sentinel
        process
        (lambda (process _event)
+         (message "proc sentinal")
          (let ((output (with-current-buffer (process-buffer process)
                          (buffer-string)))
                (exit-status (process-exit-status process)))
+           (message "proc sentinal exit status %s" exit-status)
            (when (functionp on-complete)
              (funcall on-complete))
-           (message "Proc sentinel> %s" output)
-           (with-current-buffer buffer
+           (message "Proc sentinel> %s" (funcall extract-response output))
+           (with-current-buffer (process-buffer process)
              (if (= exit-status 0)
                  (if (string-empty-p (string-trim output))
                      (funcall callback output nil)
@@ -150,7 +152,6 @@
                                   :top_p (text-sage-llm-openai-top-p model)
                                   :logprobs (text-sage-llm-openai-logprobs model)
                                   :stop stop
-                                  :stream t
                                   :presence_penalty (text-sage-llm-openai-presence-penalty model)
                                   :frequency_penalty (text-sage-llm-openai-frequency-penalty model)
                                   :best_of (text-sage-llm-openai-best-of model)
@@ -162,7 +163,7 @@
                                                  (json-parse-string body :object-type 'alist)
                                                body))
                                   0)))
-               t
+               nil
                (if text-sage-prevent-multiple-calls
                    (lambda ()
                      (remhash model text-sage-lm-requests))
@@ -240,7 +241,11 @@
   top-p
   presence-penalty
   frequency-penalty
-  logit-bias)
+  logit-bias
+  ;; format should JSON encode to the spec
+  ;; https://platform.openai.com/docs/api-reference/chat/create#chat/create-functions
+  functions
+  function-call)
 
 (cl-defmethod text-sage-chat-llm-p ((model text-sage-llm-openai-chat)) t)
 
@@ -272,7 +277,10 @@
                                     :stop stop
                                     :presence_penalty (text-sage-llm-openai-chat-presence-penalty model)
                                     :frequency_penalty (text-sage-llm-openai-chat-frequency-penalty model)
-                                    :logit_bias (text-sage-llm-openai-chat-logit-bias model)))))
+                                    :logit_bias (text-sage-llm-openai-chat-logit-bias model)
+                                    :functions (text-sage-llm-openai-chat-functions model)
+                                    :function-call
+                                    (text-sage-llm-openai-chat-function-call model)))))
                  (lambda (body)
                    ;; TODO refactor this.
                    (alist-get 'content
@@ -282,7 +290,7 @@
                                                               (json-parse-string body :object-type 'alist)
                                                             body))
                                                0))))
-                 t
+                 nil
                  (if text-sage-prevent-multiple-calls
                      (lambda ()
                        (remhash model text-sage-lm-requests))
@@ -292,7 +300,6 @@
 
 ;;; Tokens
 
-;; TODO: implement token counting
 (defun text-sage-count-tokens (message)
   (cond
    ((stringp message)
@@ -874,7 +881,6 @@ New lines of conversation:
            `((summary . ,(or summary "<no summary>"))
              (new-lines . ,(text-sage-format to-be-summarized nil)))
            (lambda (res _)
-             (message "GOT SUMMARY!!!: %s" res)
              (setf (text-sage-conversation-summary-buffer-memory-messages memory) remaining)
              (setf (text-sage-conversation-summary-buffer-memory-summary memory) res))))
       (message "===")
@@ -972,12 +978,10 @@ AI:")
          (cb (if (or (not parser) text-sage-disable-parser)
                       callback
                     (lambda (result _partial)
-                      (message "PARSING: %s" result)
                       (text-sage-parse-with-correction llm parser result callback)))))
     (text-sage-generic-llm-call
      llm prompt inputs
      (lambda (result partial)
-       (message ">>> %s %s" result partial)
        (when (not partial)
          (if (text-sage-chat-prompt-p prompt)
              (let ((last-msg (cadar (last (text-sage-chat-format prompt inputs)))))
