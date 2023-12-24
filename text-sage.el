@@ -72,14 +72,12 @@
       (set-process-sentinel
        process
        (lambda (process _event)
-         (message "proc sentinal")
          (let ((output (with-current-buffer (process-buffer process)
                          (buffer-string)))
                (exit-status (process-exit-status process)))
-           (message "proc sentinal exit status %s" exit-status)
+
            (when (functionp on-complete)
              (funcall on-complete))
-           (message "Proc sentinel> %s" (funcall extract-response output))
            (with-current-buffer (process-buffer process)
              (if (= exit-status 0)
                  (if (string-empty-p (string-trim output))
@@ -132,9 +130,7 @@
   "Call OpenAI Language MODEL with PROMPT and STOP and call CALLBACK with res."
   ;; sync shell command
 
-  (when (and text-sage-prevent-multiple-calls
-             (gethash model text-sage-lm-requests))
-    (error "Model has an in progress request: %s" model))
+
   (let ((proc (text-sage-async-shell-command
                callback
                (list "curl"
@@ -166,7 +162,7 @@
                nil
                (if text-sage-prevent-multiple-calls
                    (lambda ()
-                     (remhash model text-sage-lm-requests))
+                     (ignore))
                  (lambda ())))))
     (when text-sage-prevent-multiple-calls
       (puthash model proc text-sage-lm-requests))))
@@ -293,7 +289,7 @@
                  nil
                  (if text-sage-prevent-multiple-calls
                      (lambda ()
-                       (remhash model text-sage-lm-requests))
+                       (ignore))
                    (lambda ())))))
       (when text-sage-prevent-multiple-calls
        (puthash model proc text-sage-lm-requests)))))
@@ -413,7 +409,7 @@ second a string."
         (while (search-forward-regexp
                 (format "{{ *%s *}}" (regexp-quote (if (symbolp key) (symbol-name key) key)))
                 nil t)
-          (replace-match val)))
+          (replace-match (regexp-quote val) nil t)))
       (buffer-string)))
    (t (error "Invalid prompt %s" prompt))))
 
@@ -1090,6 +1086,12 @@ AI:")
 ;;    llm
 ;;    '((("role" . "user") ("content" . "Once upon a time, there was a")))
 ;;    (lambda (res _partialp) (message "@>>> %S" res))))
+
+;; (defconst csv-4 (parse-csv-string-rows (f-read "~/Downloads/4 - Sheet1.csv") ?\, ?\" "\n"))
+
+;; (nth 13 (car (cdr csv-4)))
+
+;; (defconst llm (text-sage-llm-openai-chat-create :model "gpt-4"))
 
 (provide 'text-sage)
 
